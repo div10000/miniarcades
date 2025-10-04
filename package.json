@@ -8,8 +8,9 @@
     "start": "next start"
   },
   "dependencies": {
+    "@babylonjs/core": "^8.30.2",
+    "@babylonjs/gui": "^8.30.2",
     "next": "15.5.4",
-    "pixi.js": "^8.13.2",
     "react": "19.1.0",
     "react-dom": "19.1.0"
   },
