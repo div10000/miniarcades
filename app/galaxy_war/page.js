@@ -1,284 +1,568 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import * as BABYLON from '@babylonjs/core';
 import * as GUI from '@babylonjs/gui';
-
-// It's good practice to define game dimensions as constants
-const GAME_WIDTH = 800;
-const GAME_HEIGHT = 600;
+const GAME_WIDTH = 900; // logical width (kept for camera calculations)
+const GAME_HEIGHT = 600; // logical height
 
 export default function GalaxyWar() {
   const babylonCanvasRef = useRef(null);
+  const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    let engine;
-    let scene;
+    let engine = null;
+    let scene = null;
+    let advancedTexture = null;
+    let game = null;
 
-    const initBabylon = async () => {
-      if (babylonCanvasRef.current) {
-        engine = new BABYLON.Engine(babylonCanvasRef.current, true);
-        scene = new BABYLON.Scene(engine);
-        
-        // --- Game State Variables ---
-        let score = 0;
-        let lives = 3;
-        let isGameOver = false;
-        let player, playerMaterial;
-        const enemies = [];
-        const playerBullets = [];
-        const enemyBullets = [];
-        let scoreText, livesText, gameOverText;
-        let inputMap = {};
+    // Small utility: clamp
+    const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
-        // --- Camera and Lighting ---
-        const camera = new BABYLON.FreeCamera("camera1", new BABYLON.Vector3(0, 5, -15), scene);
-        camera.setTarget(BABYLON.Vector3.Zero());
-        const light = new BABYLON.HemisphericLight("light1", new BABYLON.Vector3(0, 1, 0), scene);
-        light.intensity = 0.8;
-
-        // --- Background ---
-        const background = new BABYLON.Layer("back", "/assets/background.png", scene);
-        background.isBackground = true;
-        background.texture.level = 0;
-        background.texture.wAng = 0;
-        
-        // --- GUI ---
-        const advancedTexture = GUI.AdvancedDynamicTexture.CreateFullscreenUI("UI");
-        scoreText = new GUI.TextBlock();
-        scoreText.text = "Score: 0";
-        scoreText.color = "white";
-        scoreText.fontSize = 24;
-        scoreText.textHorizontalAlignment = GUI.Control.HORIZONTAL_ALIGNMENT_LEFT;
-        scoreText.textVerticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_TOP;
-        scoreText.paddingTop = "10px";
-        scoreText.paddingLeft = "10px";
-        advancedTexture.addControl(scoreText);
-
-        livesText = new GUI.TextBlock();
-        livesText.text = "Lives: 3";
-        livesText.color = "white";
-        livesText.fontSize = 24;
-        livesText.textHorizontalAlignment = GUI.Control.HORIZONTAL_ALIGNMENT_RIGHT;
-        livesText.textVerticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_TOP;
-        livesText.paddingTop = "10px";
-        livesText.paddingRight = "10px";
-        advancedTexture.addControl(livesText);
-        
-        // --- Player Setup ---
-        player = BABYLON.MeshBuilder.CreatePlane("player", {size: 1.5}, scene);
-        player.position = new BABYLON.Vector3(0, 0, -5);
-        playerMaterial = new BABYLON.StandardMaterial("playerMat", scene);
-        playerMaterial.diffuseTexture = new BABYLON.Texture("/assets/player.png", scene);
-        playerMaterial.diffuseTexture.hasAlpha = true;
-        playerMaterial.useAlphaFromDiffuseTexture = true;
-        playerMaterial.backFaceCulling = false;
-        player.material = playerMaterial;
-        
-        // --- Input Handling ---
-        scene.actionManager = new BABYLON.ActionManager(scene);
-        scene.actionManager.registerAction(new BABYLON.ExecuteCodeAction(BABYLON.ActionManager.OnKeyDownTrigger, (evt) => {
-            inputMap[evt.sourceEvent.key] = evt.sourceEvent.type == "keydown";
-        }));
-        scene.actionManager.registerAction(new BABYLON.ExecuteCodeAction(BABYLON.ActionManager.OnKeyUpTrigger, (evt) => {
-            inputMap[evt.sourceEvent.key] = evt.sourceEvent.type == "keydown";
-        }));
-
-        // --- Enemy Setup ---
-        const enemyMaterial = new BABYLON.StandardMaterial("enemyMat", scene);
-        enemyMaterial.diffuseTexture = new BABYLON.Texture("/assets/enemy.png", scene);
-        enemyMaterial.diffuseTexture.hasAlpha = true;
-        enemyMaterial.useAlphaFromDiffuseTexture = true;
-        enemyMaterial.backFaceCulling = false;
-
-        for (let i = 0; i < 6; i++) {
-            const enemy = BABYLON.MeshBuilder.CreatePlane("enemy" + i, {size: 1.5}, scene);
-            enemy.material = enemyMaterial;
-            enemy.position = new BABYLON.Vector3(-6 + (i * 2.4), 6, -5);
-            enemies.push(enemy);
-        }
-
-        // --- Bullet Setup ---
-        const createBullet = (isPlayer) => {
-            const bullet = BABYLON.MeshBuilder.CreatePlane("bullet", {width: 0.2, height: 0.8}, scene);
-            bullet.material = new BABYLON.StandardMaterial("bulletMat", scene);
-            const bulletTextureUrl = isPlayer ? "/assets/bullet.png" : "https://placehold.co/20x80/ff0000/white?text=!";
-            bullet.material.diffuseTexture = new BABYLON.Texture(bulletTextureUrl, scene);
-            bullet.material.diffuseTexture.hasAlpha = true;
-            bullet.material.useAlphaFromDiffuseTexture = true;
-            bullet.isVisible = false;
-            (isPlayer ? playerBullets : enemyBullets).push(bullet);
-            return bullet;
-        }
-
-        for (let i=0; i<10; i++) createBullet(true);
-        for (let i=0; i<20; i++) createBullet(false);
-
-        let lastPlayerShot = 0;
-        const firePlayerBullet = () => {
-            const now = Date.now();
-            if (now - lastPlayerShot < 250) return; // Cooldown
-            lastPlayerShot = now;
-            const bullet = playerBullets.find(b => !b.isVisible);
-            if (bullet) {
-                bullet.isVisible = true;
-                bullet.position = player.position.clone();
-            }
-        }
-        
-        let lastEnemyShot = 0;
-        const fireEnemyBullet = () => {
-             const now = Date.now();
-            if (now - lastEnemyShot < 1000) return; // Cooldown
-            lastEnemyShot = now;
-            const livingEnemies = enemies.filter(e => e.isEnabled());
-            if (livingEnemies.length > 0) {
-                const randomEnemy = livingEnemies[Math.floor(Math.random() * livingEnemies.length)];
-                const bullet = enemyBullets.find(b => !b.isVisible);
-                if (bullet) {
-                    bullet.isVisible = true;
-                    bullet.position = randomEnemy.position.clone();
-                }
-            }
-        }
-
-        const createExplosion = (position) => {
-            const particleSystem = new BABYLON.ParticleSystem("particles", 2000, scene);
-            // Using a placeholder for explosion as the asset might not exist
-            particleSystem.particleTexture = new BABYLON.Texture("https://placehold.co/64x64/ffa500/white?text=BOOM", scene);
-            particleSystem.emitter = position;
-            particleSystem.minEmitBox = new BABYLON.Vector3(-0.5, -0.5, -0.5);
-            particleSystem.maxEmitBox = new BABYLON.Vector3(0.5, 0.5, 0.5);
-            particleSystem.color1 = new BABYLON.Color4(1, 0.5, 0, 1);
-            particleSystem.color2 = new BABYLON.Color4(1, 0, 0, 1);
-            particleSystem.minSize = 0.1;
-            particleSystem.maxSize = 0.5;
-            particleSystem.minLifeTime = 0.2;
-            particleSystem.maxLifeTime = 0.5;
-            particleSystem.emitRate = 1000;
-            particleSystem.direction1 = new BABYLON.Vector3(-1, -1, -1);
-            particleSystem.direction2 = new BABYLON.Vector3(1, 1, 1);
-            particleSystem.minAngularSpeed = 0;
-            particleSystem.maxAngularSpeed = Math.PI;
-            particleSystem.gravity = new BABYLON.Vector3(0, 0, 0);
-            particleSystem.start();
-            setTimeout(() => particleSystem.dispose(), 1000);
-        }
-
-        const showGameOver = (message) => {
-            isGameOver = true;
-            gameOverText = new GUI.TextBlock();
-            gameOverText.text = message + "\nClick to Restart";
-            gameOverText.color = "white";
-            gameOverText.fontSize = 48;
-            gameOverText.textHorizontalAlignment = GUI.Control.HORIZONTAL_ALIGNMENT_CENTER;
-            gameOverText.textVerticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_CENTER;
-            advancedTexture.addControl(gameOverText);
-
-            // Restart listener
-            scene.onPointerObservable.addOnce((pointerInfo) => {
-                // Reset logic here...
-                 window.location.reload(); // Simple restart
-            });
-        }
-        
-        let time = 0;
-        // --- Game Loop ---
-        scene.onBeforeRenderObservable.add(() => {
-            if (isGameOver) return;
-            
-            const deltaTime = engine.getDeltaTime() / 1000;
-            time += deltaTime;
-
-            // Player Movement
-            if (inputMap["a"] || inputMap["ArrowLeft"]) {
-                player.position.x -= 8 * deltaTime;
-                if (player.position.x < -8) player.position.x = -8;
-            }
-            if (inputMap["d"] || inputMap["ArrowRight"]) {
-                player.position.x += 8 * deltaTime;
-                 if (player.position.x > 8) player.position.x = 8;
-            }
-            if (inputMap[" "]) {
-                firePlayerBullet();
-            }
-
-            // Enemy Movement
-            enemies.forEach(enemy => {
-                enemy.position.x += Math.sin(time * 2 + enemy.position.y) * 0.02;
-            });
-
-            fireEnemyBullet();
-
-            // Bullets movement
-            playerBullets.forEach(bullet => {
-                if (bullet.isVisible) {
-                    bullet.position.y += 15 * deltaTime;
-                    if (bullet.position.y > 10) bullet.isVisible = false;
-                }
-            });
-            enemyBullets.forEach(bullet => {
-                if (bullet.isVisible) {
-                    bullet.position.y -= 10 * deltaTime;
-                    if (bullet.position.y < -10) bullet.isVisible = false;
-                }
-            });
-
-            // Collision Detection
-            playerBullets.forEach(bullet => {
-                if (!bullet.isVisible) return;
-                enemies.forEach(enemy => {
-                    if (enemy.isEnabled() && bullet.intersectsMesh(enemy, false)) {
-                        createExplosion(enemy.position);
-                        enemy.setEnabled(false);
-                        bullet.isVisible = false;
-                        score += 10;
-                        scoreText.text = "Score: " + score;
-                        if (enemies.every(e => !e.isEnabled())) {
-                            showGameOver("You Win!");
-                        }
-                    }
-                });
-            });
-
-            enemyBullets.forEach(bullet => {
-                if (!bullet.isVisible) return;
-                if (player.isEnabled() && bullet.intersectsMesh(player, false)) {
-                    createExplosion(player.position);
-                    bullet.isVisible = false;
-                    lives--;
-                    livesText.text = "Lives: " + lives;
-                    if (lives <= 0) {
-                        player.setEnabled(false);
-                        showGameOver("Game Over");
-                    }
-                }
-            });
-
-        });
-        
-        engine.runRenderLoop(() => {
-            scene.render();
+    class Pool {
+      constructor(factory, size = 10) {
+        this.items = [];
+        this.factory = factory;
+        for (let i = 0; i < size; i++) this.items.push(this.factory());
+      }
+      acquire() {
+        const found = this.items.find(i => !i._active);
+        if (found) return found;
+        const created = this.factory();
+        this.items.push(created);
+        return created;
+      }
+      release(item) {
+        item._active = false;
+        if (item.isVisible !== undefined) item.isVisible = false;
+      }
+      forEach(fn) {
+        this.items.forEach(fn);
+      }
+      releaseAll() {
+        this.items.forEach(i => {
+          i._active = false;
+          if (i.isVisible !== undefined) i.isVisible = false;
         });
       }
+    }
+
+    class Game {
+      constructor(scene, engine) {
+        this.scene = scene;
+        this.engine = engine;
+        this.state = 'MENU'; // MENU, PLAYING, GAMEOVER
+        this.score = 0;
+        this.lives = 3;
+        this.highscore = parseInt(localStorage.getItem('gw_highscore') || '0', 10);
+        this.player = null;
+        this.enemyGroup = [];
+        this.playerPool = null;
+        this.enemyBullets = null;
+        this.playerBullets = null;
+        this.ui = {};
+        this.time = 0;
+        this.lastPlayerShot = 0;
+        this.lastEnemyShot = 0;
+        this.input = { left: false, right: false, fire: false };
+        this.touchPointers = {};
+        this.init();
+      }
+
+      init() {
+        const scene = this.scene;
+
+        // Camera & light (very simple for 2D feel)
+        const cam = new BABYLON.FreeCamera('cam', new BABYLON.Vector3(0, 0, -20), scene);
+        cam.setTarget(BABYLON.Vector3.Zero());
+        cam.mode = BABYLON.Camera.ORTHOGRAPHIC_CAMERA;
+        this.camera = cam;
+        // helper to compute ortho bounds based on canvas aspect
+        this._updateOrtho = () => {
+          try {
+            const rect = this.engine.getRenderingCanvasClientRect();
+            const aspect = (rect.width / rect.height) || 1;
+            const halfV = GAME_HEIGHT / 200; // vertical half span (keeps scale)
+            cam.orthoTop = halfV;
+            cam.orthoBottom = -halfV;
+            cam.orthoLeft = -halfV * aspect;
+            cam.orthoRight = halfV * aspect;
+          } catch (e) {
+            // fallback
+            cam.orthoLeft = -GAME_WIDTH / 200;
+            cam.orthoRight = GAME_WIDTH / 200;
+            cam.orthoTop = GAME_HEIGHT / 200;
+            cam.orthoBottom = -GAME_HEIGHT / 200;
+          }
+        };
+        this._updateOrtho();
+        // respond to resizes to keep full-screen layout proper
+        window.addEventListener('resize', this._onResize = () => {
+          try { this.engine.resize(); } catch (e) {}
+          this._updateOrtho();
+          // update HUD font sizes if needed (GUI does scaling automatically)
+        });
+        // expose a helper to read current ortho bounds
+        this.getBounds = () => ({
+          left: cam.orthoLeft,
+          right: cam.orthoRight,
+          top: cam.orthoTop,
+          bottom: cam.orthoBottom
+        });
+
+        new BABYLON.HemisphericLight('l', new BABYLON.Vector3(0, 1, 0), scene).intensity = 1;
+
+        // Background stars using a dynamic texture on a big plane
+        const bgPlane = BABYLON.MeshBuilder.CreatePlane('bg', { width: GAME_WIDTH / 100, height: GAME_HEIGHT / 100 }, scene);
+        bgPlane.position.z = 10;
+        const bgDt = new BABYLON.DynamicTexture('bgdt', { width: 512, height: 512 }, scene, false);
+        const ctx = bgDt.getContext();
+        ctx.fillStyle = '#000010';
+        ctx.fillRect(0, 0, 512, 512);
+        for (let i = 0; i < 200; i++) {
+          ctx.fillStyle = Math.random() > 0.95 ? '#ffffff' : '#88aaff';
+          const x = Math.random() * 512;
+          const y = Math.random() * 512;
+          const s = Math.random() * 2 + 0.5;
+          ctx.fillRect(x, y, s, s);
+        }
+        bgDt.update();
+        const bgMat = new BABYLON.StandardMaterial('bgm', scene);
+        bgMat.diffuseTexture = bgDt;
+        bgMat.emissiveColor = new BABYLON.Color3(1, 1, 1);
+        bgMat.backFaceCulling = false;
+        bgPlane.material = bgMat;
+
+        // Player (much smaller)
+        this.player = BABYLON.MeshBuilder.CreatePlane('player', { size: 0.5 }, scene);
+        this.player.position = new BABYLON.Vector3(0, -3.2, 0);
+        this.player._size = 0.5;
+        const pMat = new BABYLON.StandardMaterial('pMat', scene);
+        pMat.diffuseTexture = new BABYLON.Texture('/assets/player.png', scene);
+        pMat.diffuseTexture.hasAlpha = true;
+        pMat.useAlphaFromDiffuseTexture = true;
+        pMat.backFaceCulling = false;
+        this.player.material = pMat;
+        this.player._active = true;
+
+        // Enemy material
+        const eMat = new BABYLON.StandardMaterial('eMat', scene);
+        eMat.diffuseTexture = new BABYLON.Texture('/assets/enemy.png', scene);
+        eMat.diffuseTexture.hasAlpha = true;
+        eMat.useAlphaFromDiffuseTexture = true;
+        eMat.backFaceCulling = false;
+
+        // Pools
+        this.playerBullets = new Pool(() => {
+          const b = BABYLON.MeshBuilder.CreatePlane('pbullet', { width: 0.09, height: 0.36 }, scene);
+          const m = new BABYLON.StandardMaterial('pbm', scene);
+          m.diffuseTexture = new BABYLON.Texture('/assets/bullet.png', scene);
+          m.diffuseTexture.hasAlpha = true;
+          m.useAlphaFromDiffuseTexture = true;
+          m.backFaceCulling = false;
+          b.material = m;
+          b.isVisible = false;
+          b._active = false;
+          b._size = 0.2;
+          return b;
+        }, 12);
+
+        this.enemyBullets = new Pool(() => {
+          const b = BABYLON.MeshBuilder.CreatePlane('ebullet', { width: 0.09, height: 0.36 }, scene);
+          const m = new BABYLON.StandardMaterial('ebm', scene);
+          m.diffuseTexture = new BABYLON.Texture('/assets/enemy_bullet.png', scene);
+          m.diffuseTexture.hasAlpha = true;
+          m.useAlphaFromDiffuseTexture = true;
+          m.backFaceCulling = false;
+          b.material = m;
+          b.isVisible = false;
+          b._active = false;
+          b._size = 0.2;
+          return b;
+        }, 24);
+
+        // Enemies as simple meshes pooled
+        this.enemyPool = new Pool(() => {
+          const e = BABYLON.MeshBuilder.CreatePlane('enemy', { size: 0.5 }, scene);
+          e.material = eMat;
+          e.isVisible = false;
+          e._active = false;
+          e._size = 0.5;
+          // store a baseX/baseY to allow consistent motion
+          e._base = new BABYLON.Vector3(0, 0, 0);
+          return e;
+        }, 24);
+
+        // Create a formation of enemies (position relative to camera bounds)
+        const makeFormation = () => {
+          // compute placement using current camera bounds so formation is fully visible
+          const bounds = this.getBounds();
+          const rows = 3;
+          const cols = 8;
+          const spacingX = 1.1;
+          const spacingY = 0.9;
+          // top row should be slightly below top bound
+          const topY = bounds.top - 0.6; // margin from top
+          const startX = -(cols - 1) / 2 * spacingX;
+          const created = [];
+          for (let r = 0; r < rows; r++) {
+            for (let c = 0; c < cols; c++) {
+              const en = this.enemyPool.acquire();
+              en.position = new BABYLON.Vector3(startX + c * spacingX, topY - r * spacingY, 0);
+              en._base.x = en.position.x;
+              en._base.y = en.position.y;
+              en.isVisible = true;
+              en._active = true;
+              created.push(en);
+            }
+          }
+          return created;
+        };
+
+        this.enemyGroup = makeFormation();
+
+        // HUD
+        advancedTexture = GUI.AdvancedDynamicTexture.CreateFullscreenUI('UI');
+        this.ui.score = new GUI.TextBlock();
+        this.ui.score.text = `Score: ${this.score}`;
+        this.ui.score.color = 'white';
+        this.ui.score.fontSize = 20;
+        this.ui.score.horizontalAlignment = GUI.Control.HORIZONTAL_ALIGNMENT_LEFT;
+        this.ui.score.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_TOP;
+        this.ui.score.left = '12px';
+        this.ui.score.top = '8px';
+        advancedTexture.addControl(this.ui.score);
+
+        this.ui.lives = new GUI.TextBlock();
+        this.ui.lives.text = `Lives: ${this.lives}`;
+        this.ui.lives.color = 'white';
+        this.ui.lives.fontSize = 20;
+        this.ui.lives.horizontalAlignment = GUI.Control.HORIZONTAL_ALIGNMENT_RIGHT;
+        this.ui.lives.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_TOP;
+        this.ui.lives.right = '12px';
+        this.ui.lives.top = '8px';
+        advancedTexture.addControl(this.ui.lives);
+
+        this.ui.center = new GUI.TextBlock();
+        this.ui.center.text = `Galaxy War`;
+        this.ui.center.color = 'white';
+        this.ui.center.fontSize = 36;
+        this.ui.center.horizontalAlignment = GUI.Control.HORIZONTAL_ALIGNMENT_CENTER;
+        this.ui.center.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_CENTER;
+        advancedTexture.addControl(this.ui.center);
+
+        this.ui.hint = new GUI.TextBlock();
+        this.ui.hint.text = `Tap to Start (or press Space)`;
+        this.ui.hint.color = '#aaccff';
+        this.ui.hint.fontSize = 18;
+        this.ui.hint.horizontalAlignment = GUI.Control.HORIZONTAL_ALIGNMENT_CENTER;
+        this.ui.hint.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_CENTER;
+        this.ui.hint.top = '40px';
+        advancedTexture.addControl(this.ui.hint);
+
+        // Input handling
+        window.addEventListener('keydown', this._onKeyDown = (e) => {
+          if (e.code === 'ArrowLeft' || e.key === 'a') this.input.left = true;
+          if (e.code === 'ArrowRight' || e.key === 'd') this.input.right = true;
+          if (e.code === 'Space') this._tryStartOrFire();
+        });
+        window.addEventListener('keyup', this._onKeyUp = (e) => {
+          if (e.code === 'ArrowLeft' || e.key === 'a') this.input.left = false;
+          if (e.code === 'ArrowRight' || e.key === 'd') this.input.right = false;
+          if (e.code === 'Space') this.input.fire = false;
+        });
+
+        // Pointer/touch for mobile controls. We'll use simple left/right thirds + tap to fire
+        scene.onPointerObservable.add(this._pointerObserver = (pi) => {
+          if (pi.type === BABYLON.PointerEventTypes.POINTERDOWN) {
+            const x = pi.event.clientX;
+            const w = engine.getRenderingCanvasClientRect().width;
+            if (this.state === 'MENU') return this.start();
+            if (this.state === 'GAMEOVER') return this.restart();
+            if (x < w / 3) this.input.left = true;
+            else if (x > (w * 2) / 3) this.input.right = true;
+            else this._firePlayer();
+          }
+          if (pi.type === BABYLON.PointerEventTypes.POINTERUP) {
+            this.input.left = false;
+            this.input.right = false;
+            this.input.fire = false;
+          }
+        });
+
+        // Main loop
+        scene.onBeforeRenderObservable.add(this._loop = () => {
+          const dt = this.engine.getDeltaTime() / 1000;
+          if (this.state === 'PLAYING') this.update(dt);
+        });
+
+        // Start rendering
+        engine.runRenderLoop(() => scene.render());
+      }
+
+      _tryStartOrFire() {
+        if (this.state === 'MENU') return this.start();
+        if (this.state === 'PLAYING') return this._firePlayer();
+        if (this.state === 'GAMEOVER') return this.restart();
+      }
+
+      start() {
+        this.state = 'PLAYING';
+        this.ui.center.text = '';
+        this.ui.hint.text = '';
+        // ensure score/lives shown
+        this.ui.score.text = `Score: ${this.score}`;
+        this.ui.lives.text = `Lives: ${this.lives}`;
+      }
+
+      restart() {
+        // Reset game state
+        this.score = 0;
+        this.lives = 3;
+        this.ui.score.text = `Score: ${this.score}`;
+        this.ui.lives.text = `Lives: ${this.lives}`;
+
+        // release all bullets
+        this.playerBullets.releaseAll();
+        this.enemyBullets.releaseAll();
+
+        // reset enemy group: mark pool items inactive then re-acquire formation
+        // Do not dispose meshes (we use pool), just mark inactive
+        this.enemyGroup.forEach(e => {
+          e._active = false;
+          e.isVisible = false;
+        });
+        this.enemyGroup = [];
+
+        // recreate formation based on current bounds
+        const bounds = this.getBounds();
+        const rows = 3;
+        const cols = 8;
+        const spacingX = 1.1;
+        const spacingY = 0.9;
+        const topY = bounds.top - 0.6;
+        const startX = -(cols - 1) / 2 * spacingX;
+        for (let r = 0; r < rows; r++) {
+          for (let c = 0; c < cols; c++) {
+            const en = this.enemyPool.acquire();
+            en.position = new BABYLON.Vector3(startX + c * spacingX, topY - r * spacingY, 0);
+            en._base.x = en.position.x;
+            en._base.y = en.position.y;
+            en.isVisible = true;
+            en._active = true;
+            this.enemyGroup.push(en);
+          }
+        }
+
+        // reset player
+        this.player.position.x = 0;
+        this.player.position.y = bounds.bottom + 0.8; // keep player near bottom
+        this.player.isVisible = true;
+        this.player._active = true;
+
+        // clear center/hint
+        this.ui.center.text = '';
+        this.ui.hint.text = '';
+
+        this.state = 'PLAYING';
+      }
+
+      _firePlayer() {
+        const now = performance.now();
+        if (now - this.lastPlayerShot < 220) return;
+        this.lastPlayerShot = now;
+        const b = this.playerBullets.acquire();
+        b.position = this.player.position.clone();
+        b.position.y += 0.9;
+        b.isVisible = true;
+        b._active = true;
+      }
+
+      _enemyFire() {
+        const now = performance.now();
+        if (now - this.lastEnemyShot < 700) return;
+        this.lastEnemyShot = now;
+        const alive = this.enemyGroup.filter(e => e._active);
+        if (!alive.length) return;
+        const shooter = alive[Math.floor(Math.random() * alive.length)];
+        const b = this.enemyBullets.acquire();
+        b.position = shooter.position.clone();
+        b.position.y -= 0.7;
+        b.isVisible = true;
+        b._active = true;
+      }
+
+      explode(pos) {
+        const ps = new BABYLON.ParticleSystem('p', 200, this.scene);
+        ps.particleTexture = new BABYLON.Texture('/assets/bullet.png', this.scene);
+        ps.emitter = pos.clone();
+        ps.minEmitBox = new BABYLON.Vector3(-0.2, -0.2, 0);
+        ps.maxEmitBox = new BABYLON.Vector3(0.2, 0.2, 0);
+        ps.color1 = new BABYLON.Color4(1, 0.8, 0.2, 1);
+        ps.color2 = new BABYLON.Color4(1, 0.2, 0.1, 1);
+        ps.minSize = 0.05;
+        ps.maxSize = 0.25;
+        ps.minLifeTime = 0.2;
+        ps.maxLifeTime = 0.7;
+        ps.emitRate = 200;
+        ps.direction1 = new BABYLON.Vector3(-1, -1, 0);
+        ps.direction2 = new BABYLON.Vector3(1, 1, 0);
+        ps.start();
+        setTimeout(() => ps.stop(), 200);
+        setTimeout(() => {
+          try { ps.dispose(); } catch (e) {}
+        }, 1200);
+      }
+
+      update(dt) {
+        this.time += dt;
+
+        // Player movement with smooth easing
+        const speed = 6;
+        if (this.input.left) this.player.position.x -= speed * dt;
+        if (this.input.right) this.player.position.x += speed * dt;
+        // clamp to camera ortho bounds
+        const b = this.getBounds();
+        const worldLeft = b.left + this.player._size / 2;
+        const worldRight = b.right - this.player._size / 2;
+        const worldTop = b.top - this.player._size / 2;
+        const worldBottom = b.bottom + this.player._size / 2;
+        this.player.position.x = clamp(this.player.position.x, worldLeft, worldRight);
+        this.player.position.y = clamp(this.player.position.y, worldBottom, worldTop);
+
+        // Bullets
+        this.playerBullets.forEach(bu => {
+          if (!bu._active) return;
+          bu.position.y += 12 * dt; // slightly faster
+          // clamp bullets to visible area
+          if (bu.position.y > worldTop + 1) this.playerBullets.release(bu);
+        });
+        this.enemyBullets.forEach(bu => {
+          if (!bu._active) return;
+          bu.position.y -= 7.5 * dt; // slightly faster
+          if (bu.position.y < worldBottom - 1) this.enemyBullets.release(bu);
+        });
+
+        // Enemy simple oscillation (around their base positions)
+        this.enemyGroup.forEach((e, idx) => {
+          if (!e._active) return;
+          // oscillate around base
+          e.position.x = e._base.x + Math.sin(this.time * 1.2 + idx) * 0.3;
+          // clamp enemy to bounds
+          const eb = this.getBounds();
+          const eLeft = eb.left + (e._size || 0.5) / 2;
+          const eRight = eb.right - (e._size || 0.5) / 2;
+          e.position.x = clamp(e.position.x, eLeft, eRight);
+        });
+
+        // Enemy shooting (occasional)
+        if (Math.random() < 0.02) this._enemyFire();
+
+        // Collisions: naive bounding box checks (fast enough for small counts)
+        this.playerBullets.forEach(pb => {
+          if (!pb._active) return;
+          for (const e of this.enemyGroup) {
+            if (!e._active) continue;
+            if (Math.abs(pb.position.x - e.position.x) < 0.45 && Math.abs(pb.position.y - e.position.y) < 0.45) {
+              // hit
+              this.playerBullets.release(pb);
+              e._active = false;
+              e.isVisible = false;
+              this.score += 10;
+              this.ui.score.text = `Score: ${this.score}`;
+              this.explode(e.position);
+              // win check
+              if (this.enemyGroup.every(x => !x._active)) this.win();
+              break;
+            }
+          }
+        });
+
+        // Enemy bullets vs player
+        this.enemyBullets.forEach(eb => {
+          if (!eb._active) return;
+          if (Math.abs(eb.position.x - this.player.position.x) < 0.5 && Math.abs(eb.position.y - this.player.position.y) < 0.5) {
+            this.enemyBullets.release(eb);
+            this.lives -= 1;
+            this.ui.lives.text = `Lives: ${this.lives}`;
+            this.explode(this.player.position);
+            if (this.lives <= 0) this.gameOver();
+          }
+        });
+      }
+
+      win() {
+        this.state = 'GAMEOVER';
+        this.ui.center.text = `You Win!`;
+        this.ui.hint.text = `Tap to Restart`;
+        this._saveHighscore();
+      }
+
+      gameOver() {
+        this.state = 'GAMEOVER';
+        this.player._active = false;
+        this.player.isVisible = false;
+        this.ui.center.text = `Game Over`;
+        this.ui.hint.text = `Tap to Restart`;
+        this._saveHighscore();
+      }
+
+      _saveHighscore() {
+        if (this.score > this.highscore) {
+          this.highscore = this.score;
+          localStorage.setItem('gw_highscore', String(this.highscore));
+        }
+      }
+
+      dispose() {
+        try {
+          window.removeEventListener('keydown', this._onKeyDown);
+          window.removeEventListener('keyup', this._onKeyUp);
+        } catch (e) {}
+        if (this.scene) {
+          try { this.scene.onBeforeRenderObservable.removeCallback(this._loop); } catch (e) {}
+          try { this.scene.onPointerObservable.remove(this._pointerObserver); } catch (e) {}
+        }
+      }
+    }
+
+    const init = async () => {
+      if (!babylonCanvasRef.current) return;
+      engine = new BABYLON.Engine(babylonCanvasRef.current, true, { preserveDrawingBuffer: true, stencil: true });
+      // make crisp on high DPI
+      engine.setHardwareScalingLevel(1 / Math.max(1, window.devicePixelRatio || 1));
+      scene = new BABYLON.Scene(engine);
+      scene.clearColor = new BABYLON.Color4(0, 0, 0, 1);
+
+      // Create game instance
+      game = new Game(scene, engine);
+
+      setReady(true);
+
+      // Cleanup on unmount
+      (init).cleanup = () => {
+        if (game) game.dispose();
+        if (engine) engine.dispose();
+      };
     };
-    
-    initBabylon();
+
+    init();
 
     return () => {
-      if (engine) {
-        engine.dispose();
-      }
+      if (game) game.dispose();
+      if (engine) engine.dispose();
     };
   }, []);
 
   return (
-    <div className="w-full h-screen flex justify-center items-center bg-gray-900">
+    <div style={{ position: 'fixed', inset: 0, margin: 0, padding: 0, overflow: 'hidden', background: 'black' }}>
       <canvas
         ref={babylonCanvasRef}
-        style={{ width: `${GAME_WIDTH}px`, height: `${GAME_HEIGHT}px`, outline: 'none' }}
+        style={{ width: '100vw', height: '100vh', display: 'block', outline: 'none' }}
       />
+      {!ready && (
+        <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'white' }}>Loading...</div>
+      )}
     </div>
   );
 }
-
