@@ -53,7 +53,7 @@ export default function GalaxyWar() {
         this.engine = engine;
         this.state = 'MENU'; // MENU, PLAYING, GAMEOVER, PAUSED
         this.score = 0;
-        this.lives = 3;
+        this.lives = 10;
         this.highscore = parseInt(localStorage.getItem('gw_highscore') || '0', 10);
         this.player = null;
         this.enemyGroup = [];
@@ -69,6 +69,8 @@ export default function GalaxyWar() {
         this.touchPointers = {};
         this._visibilityHandler = null;
         this._resizeHandler = null;
+        this.currentWave = 0;
+        this.waveSpawnTimer = 0;
         this.init();
       }
 
@@ -217,38 +219,14 @@ export default function GalaxyWar() {
           e.isVisible = false;
           e._active = false;
           e._size = 0.5;
-          // store a baseX/baseY to allow consistent motion
           e._base = new BABYLON.Vector3(0, 0, 0);
+          e._waveType = null; // Will store wave movement type
+          e._waveParams = {}; // Parameters for wave movement
           return e;
         }, 24);
 
-        // Create a formation of enemies (position relative to camera bounds)
-        const makeFormation = () => {
-          // compute placement using current camera bounds so formation is fully visible
-          const bounds = this.getBounds();
-          const rows = 3;
-          const cols = 8;
-          const spacingX = 1.1;
-          const spacingY = 0.9;
-          // top row should be slightly below top bound
-          const topY = bounds.top - 0.6; // margin from top
-          const startX = -(cols - 1) / 2 * spacingX;
-          const created = [];
-          for (let r = 0; r < rows; r++) {
-            for (let c = 0; c < cols; c++) {
-              const en = this.enemyPool.acquire();
-              en.position = new BABYLON.Vector3(startX + c * spacingX, topY - r * spacingY, 0);
-              en._base.x = en.position.x;
-              en._base.y = en.position.y;
-              en.isVisible = true;
-              en._active = true;
-              created.push(en);
-            }
-          }
-          return created;
-        };
-
-        this.enemyGroup = makeFormation();
+        // Initialize first wave
+        this.enemyGroup = this._createWave();
 
         // HUD (Top Corners)
         advancedTexture = GUI.AdvancedDynamicTexture.CreateFullscreenUI('UI');
@@ -319,10 +297,9 @@ export default function GalaxyWar() {
           if (e.code === 'Space') this.input.fire = false;
         });
 
-        // Pointer/touch for mobile controls. We'll use simple left/right thirds + tap to fire
+        // Pointer/touch for mobile controls
         scene.onPointerObservable.add(this._pointerObserver = (pi) => {
           if (pi.type === BABYLON.PointerEventTypes.POINTERDOWN) {
-            // debounce input state changes briefly after state transitions
             if (performance.now() < this.inputCooldownUntil) return;
             const x = pi.event.clientX;
             const w = (this.engine.getRenderingCanvasClientRect && this.engine.getRenderingCanvasClientRect().width) || window.innerWidth;
@@ -347,7 +324,7 @@ export default function GalaxyWar() {
           if (this.state === 'PLAYING') this.update(dt);
         });
 
-        // Render loop with visibility handling (pause when tab hidden to save CPU)
+        // Render loop with visibility handling
         const renderFn = () => {
           try { scene.render(); } catch (e) { }
         };
@@ -390,13 +367,9 @@ export default function GalaxyWar() {
         };
 
         window.addEventListener('resize', this._resizeHandler);
-
-        // Start rendering
-        // (render loop already started above)
       }
 
       _tryStartOrFire() {
-        // prevent double-starts/restarts by cooldown
         if (performance.now() < this.inputCooldownUntil) return;
         if (this.state === 'MENU') return this.start();
         if (this.state === 'PLAYING') return this._firePlayer();
@@ -408,65 +381,39 @@ export default function GalaxyWar() {
         this.ui.center.text = '';
         this.ui.hint.text = '';
         if (this.ui.highscore) this.ui.highscore.isVisible = false;
-        // ensure score/lives shown
         this.ui.score.text = `Score: ${this.score}`;
         this.ui.lives.text = `Lives: ${this.lives}`;
-        // small input cooldown
         this.inputCooldownUntil = performance.now() + 300;
+        this.currentWave = 0;
+        this.waveSpawnTimer = 0;
+        this.enemyGroup = this._createWave();
       }
 
       restart() {
-        // Reset game state
         this.score = 0;
-        this.lives = 3;
+        this.lives = 10;
         this.ui.score.text = `Score: ${this.score}`;
         this.ui.lives.text = `Lives: ${this.lives}`;
-
-        // release all bullets
         this.playerBullets.releaseAll();
         this.enemyBullets.releaseAll();
-
-        // reset enemy group: mark pool items inactive then re-acquire formation
         this.enemyGroup.forEach(e => {
           e._active = false;
           e.isVisible = false;
         });
         this.enemyGroup = [];
-
-        // recreate formation based on current bounds
         const bounds = this.getBounds();
-        const rows = 3;
-        const cols = 8;
-        const spacingX = 1.1;
-        const spacingY = 0.9;
-        const topY = bounds.top - 0.6;
-        const startX = -(cols - 1) / 2 * spacingX;
-        for (let r = 0; r < rows; r++) {
-          for (let c = 0; c < cols; c++) {
-            const en = this.enemyPool.acquire();
-            en.position = new BABYLON.Vector3(startX + c * spacingX, topY - r * spacingY, 0);
-            en._base.x = en.position.x;
-            en._base.y = en.position.y;
-            en.isVisible = true;
-            en._active = true;
-            this.enemyGroup.push(en);
-          }
-        }
-
-        // reset player
         this.player.position.x = 0;
-        this.player.position.y = bounds.bottom + 0.8; // keep player near bottom
+        this.player.position.y = bounds.bottom + 0.8;
         this.player.isVisible = true;
         this.player._active = true;
-
-        // clear center/hint and hide highscore
         this.ui.center.text = '';
         this.ui.hint.text = '';
         if (this.ui.highscore) this.ui.highscore.isVisible = false;
-
         this.state = 'PLAYING';
-        // prevent immediate accidental taps/spaces
         this.inputCooldownUntil = performance.now() + 300;
+        this.currentWave = 0;
+        this.waveSpawnTimer = 0;
+        this.enemyGroup = this._createWave();
       }
 
       _firePlayer() {
@@ -493,13 +440,12 @@ export default function GalaxyWar() {
         b.position.y -= 0.7;
         b.isVisible = true;
         b._active = true;
-        // subtle different beep
         this._playBeep(450, 0.06);
       }
 
       explode(pos) {
         const ps = new BABYLON.ParticleSystem('p', 200, this.scene);
-        ps.particleTexture = new BABYLON.Texture('/assets/bullet.png', this.scene);
+        ps.particleTexture = new BABYLON.Texture('/assets/fragments.png', this.scene);
         ps.emitter = pos.clone();
         ps.minEmitBox = new BABYLON.Vector3(-0.2, -0.2, 0);
         ps.maxEmitBox = new BABYLON.Vector3(0.2, 0.2, 0);
@@ -517,18 +463,79 @@ export default function GalaxyWar() {
         setTimeout(() => {
           try { ps.dispose(); } catch (e) { }
         }, 1200);
-        // small explosion sound
         this._playBeep(200 + Math.random() * 300, 0.08);
+      }
+
+      _createWave() {
+        const bounds = this.getBounds();
+        const created = [];
+        this.currentWave++;
+        const waveType = (this.currentWave % 3) || 1; // Cycle through 3 wave types
+
+        if (waveType === 1) {
+          // Wave 1: Straight down, spread across top
+          const cols = 6;
+          const spacingX = 1.1;
+          const startX = -(cols - 1) / 2 * spacingX;
+          const topY = bounds.top - 0.6;
+          for (let c = 0; c < cols; c++) {
+            const en = this.enemyPool.acquire();
+            en.position = new BABYLON.Vector3(startX + c * spacingX, topY, 0);
+            en._base.x = en.position.x;
+            en._base.y = en.position.y;
+            en._waveType = 'straight';
+            en._waveParams = { speed: 0.2 };
+            en.isVisible = true;
+            en._active = true;
+            created.push(en);
+          }
+        } else if (waveType === 2) {
+          // Wave 2: Zigzag pattern
+          const count = 6;
+          const spacingX = (bounds.right - bounds.left) / (count + 1);
+          for (let i = 0; i < count; i++) {
+            const en = this.enemyPool.acquire();
+            en.position = new BABYLON.Vector3(bounds.left + spacingX * (i + 1), bounds.top - 0.6, 0);
+            en._base.x = en.position.x;
+            en._base.y = en.position.y;
+            en._waveType = 'zigzag';
+            en._waveParams = { amplitude: 1.0, frequency: 0.4, speed: 0.2, startTime: this.time + i * 0.2 };
+            en.isVisible = true;
+            en._active = true;
+            created.push(en);
+          }
+        } else {
+          // Wave 3: Arc pattern (semicircle descending)
+          const count = 7;
+          const radius = 5.0;
+          const centerX = 0;
+          const topY = bounds.top - 0.6;
+          for (let i = 0; i < count; i++) {
+            const angle = (i / (count - 1)) * Math.PI; // 0 to PI for semicircle
+            const x = centerX + radius * Math.cos(angle);
+            const y = topY + radius * Math.sin(angle);
+            const en = this.enemyPool.acquire();
+            en.position = new BABYLON.Vector3(x, y, 0);
+            en._base.x = x;
+            en._base.y = y;
+            en._waveType = 'arc';
+            en._waveParams = { speed: 1.8, radius, centerX, startAngle: angle, startTime: this.time };
+            en.isVisible = true;
+            en._active = true;
+            created.push(en);
+          }
+        }
+        return created;
       }
 
       update(dt) {
         this.time += dt;
+        this.waveSpawnTimer -= dt;
 
         // Player movement with smooth easing
         const speed = 6;
         if (this.input.left) this.player.position.x -= speed * dt;
         if (this.input.right) this.player.position.x += speed * dt;
-        // clamp to camera ortho bounds
         const b = this.getBounds();
         const worldLeft = b.left + this.player._size / 2;
         const worldRight = b.right - this.player._size / 2;
@@ -540,52 +547,77 @@ export default function GalaxyWar() {
         // Bullets
         this.playerBullets.forEach(bu => {
           if (!bu._active) return;
-          bu.position.y += 12 * dt; // slightly faster
-          // clamp bullets to visible area
+          bu.position.y += 12 * dt;
           if (bu.position.y > worldTop + 1) this.playerBullets.release(bu);
         });
         this.enemyBullets.forEach(bu => {
           if (!bu._active) return;
-          bu.position.y -= 7.5 * dt; // slightly faster
+          bu.position.y -= 3 * dt;
           if (bu.position.y < worldBottom - 1) this.enemyBullets.release(bu);
         });
 
-        // Enemy simple oscillation (around their base positions)
+        // Enemy movement based on wave type
         this.enemyGroup.forEach((e, idx) => {
           if (!e._active) return;
-          // oscillate around base
-          e.position.x = e._base.x + Math.sin(this.time * 1.2 + idx) * 0.3;
-          // clamp enemy to bounds
           const eb = this.getBounds();
           const eLeft = eb.left + (e._size || 0.5) / 2;
           const eRight = eb.right - (e._size || 0.5) / 2;
+          const eBottom = eb.bottom + (e._size || 0.5) / 2;
+
+          if (e._waveType === 'straight') {
+            e.position.y -= e._waveParams.speed * dt;
+          } else if (e._waveType === 'zigzag') {
+            const t = this.time - e._waveParams.startTime;
+            e.position.x = e._base.x + e._waveParams.amplitude * Math.sin(e._waveParams.frequency * t);
+            e.position.y = e._base.y - e._waveParams.speed * t;
+          } else if (e._waveType === 'arc') {
+            const t = this.time - e._waveParams.startTime;
+            const angle = e._waveParams.startAngle + 0.5 * t;
+            e.position.x = e._waveParams.centerX + e._waveParams.radius * Math.cos(angle);
+            e.position.y = e._base.y - e._waveParams.speed * t;
+          }
+
           e.position.x = clamp(e.position.x, eLeft, eRight);
+          e.position.y = Math.max(e.position.y, eBottom);
         });
 
-        // Enemy shooting (occasional)
-        if (Math.random() < 0.02) this._enemyFire();
+        // Check if wave is cleared or reached bottom
+        const aliveEnemies = this.enemyGroup.filter(e => e._active);
+        if (aliveEnemies.length === 0 || (aliveEnemies.length > 0 && Math.min(...aliveEnemies.map(e => e.position.y)) < b.bottom + 1.0)) {
+          if (aliveEnemies.length > 0 && Math.min(...aliveEnemies.map(e => e.position.y)) < b.bottom + 1.0) {
+            this.gameOver();
+            return;
+          }
+          if (this.waveSpawnTimer <= 0) {
+            this.enemyGroup.forEach(e => {
+              e._active = false;
+              e.isVisible = false;
+            });
+            this.enemyGroup = this._createWave();
+            this.waveSpawnTimer = 2.0; // Delay before next wave
+          }
+        }
 
-        // Collisions: naive bounding box checks (fast enough for small counts)
+        // Enemy shooting
+        if (Math.random() < 0.5) this._enemyFire();
+
+        // Collisions
         this.playerBullets.forEach(pb => {
           if (!pb._active) return;
           for (const e of this.enemyGroup) {
             if (!e._active) continue;
             if (Math.abs(pb.position.x - e.position.x) < 0.45 && Math.abs(pb.position.y - e.position.y) < 0.45) {
-              // hit
               this.playerBullets.release(pb);
               e._active = false;
               e.isVisible = false;
               this.score += 10;
               this.ui.score.text = `Score: ${this.score}`;
               this.explode(e.position);
-              // win check
-              if (this.enemyGroup.every(x => !x._active)) this.win();
               break;
             }
           }
         });
 
-        // Enemy bullets vs player
         this.enemyBullets.forEach(eb => {
           if (!eb._active) return;
           if (Math.abs(eb.position.x - this.player.position.x) < 0.5 && Math.abs(eb.position.y - this.player.position.y) < 0.5) {
@@ -646,7 +678,6 @@ export default function GalaxyWar() {
           try { this.scene.onBeforeRenderObservable.removeCallback(this._loop); } catch (e) { }
           try { this.scene.onPointerObservable.remove(this._pointerObserver); } catch (e) { }
         }
-        // dispose audio context if present
         try { if (this._audioCtx) { this._audioCtx.close(); } } catch (e) {}
       }
     }
@@ -654,17 +685,11 @@ export default function GalaxyWar() {
     const init = async () => {
       if (!babylonCanvasRef.current) return;
       engine = new BABYLON.Engine(babylonCanvasRef.current, true, { preserveDrawingBuffer: true, stencil: true });
-      // make crisp on high DPI
       engine.setHardwareScalingLevel(1 / Math.max(1, window.devicePixelRatio || 1));
       scene = new BABYLON.Scene(engine);
       scene.clearColor = new BABYLON.Color4(0, 0, 0, 1);
-
-      // Create game instance
       game = new Game(scene, engine);
-
       setReady(true);
-
-      // Cleanup on unmount
       (init).cleanup = () => {
         if (game) game.dispose();
         if (engine) engine.dispose();
