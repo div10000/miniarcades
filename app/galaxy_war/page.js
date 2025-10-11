@@ -51,7 +51,7 @@ export default function GalaxyWar() {
       constructor(scene, engine) {
         this.scene = scene;
         this.engine = engine;
-        this.state = 'MENU'; // MENU, PLAYING, GAMEOVER
+        this.state = 'MENU'; // MENU, PLAYING, GAMEOVER, PAUSED
         this.score = 0;
         this.lives = 3;
         this.highscore = parseInt(localStorage.getItem('gw_highscore') || '0', 10);
@@ -65,22 +65,48 @@ export default function GalaxyWar() {
         this.lastPlayerShot = 0;
         this.lastEnemyShot = 0;
         this.input = { left: false, right: false, fire: false };
+        this.inputCooldownUntil = 0; // debounce start/restart inputs
         this.touchPointers = {};
+        this._visibilityHandler = null;
+        this._resizeHandler = null;
         this.init();
+      }
+
+      // Simple beep using WebAudio (no external assets required)
+      _playBeep(freq = 440, duration = 0.06) {
+        try {
+          if (!this._audioCtx) this._audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+          const ctx = this._audioCtx;
+          const o = ctx.createOscillator();
+          const g = ctx.createGain();
+          o.type = 'sine';
+          o.frequency.value = freq;
+          g.gain.value = 0.0025; // keep it very subtle
+          o.connect(g);
+          g.connect(ctx.destination);
+          o.start();
+          g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + duration);
+          setTimeout(() => {
+            try { o.stop(); o.disconnect(); g.disconnect(); } catch (e) {}
+          }, duration * 1000 + 50);
+        } catch (e) {
+          // audio may be blocked by browser autoplay policies; ignore silently
+        }
       }
 
       init() {
         const scene = this.scene;
 
-        // Camera & light (very simple for 2D feel)
+        // Camera & light (orthographic)
         const cam = new BABYLON.FreeCamera('cam', new BABYLON.Vector3(0, 0, -20), scene);
         cam.setTarget(BABYLON.Vector3.Zero());
         cam.mode = BABYLON.Camera.ORTHOGRAPHIC_CAMERA;
         this.camera = cam;
+
         // helper to compute ortho bounds based on canvas aspect
         this._updateOrtho = () => {
           try {
-            const rect = this.engine.getRenderingCanvasClientRect();
+            const rect = (this.engine.getRenderingCanvasClientRect && this.engine.getRenderingCanvasClientRect()) || { width: window.innerWidth, height: window.innerHeight };
             const aspect = (rect.width / rect.height) || 1;
             const halfV = GAME_HEIGHT / 200; // vertical half span (keeps scale)
             cam.orthoTop = halfV;
@@ -96,12 +122,7 @@ export default function GalaxyWar() {
           }
         };
         this._updateOrtho();
-        // respond to resizes to keep full-screen layout proper
-        window.addEventListener('resize', this._onResize = () => {
-          try { this.engine.resize(); } catch (e) {}
-          this._updateOrtho();
-          // update HUD font sizes if needed (GUI does scaling automatically)
-        });
+
         // expose a helper to read current ortho bounds
         this.getBounds = () => ({
           left: cam.orthoLeft,
@@ -112,9 +133,17 @@ export default function GalaxyWar() {
 
         new BABYLON.HemisphericLight('l', new BABYLON.Vector3(0, 1, 0), scene).intensity = 1;
 
+        // Background plane placeholder (declared early so resize handler can reference it safely)
+        let bgPlane = null;
+
         // Background stars using a dynamic texture on a big plane
-        const bgPlane = BABYLON.MeshBuilder.CreatePlane('bg', { width: GAME_WIDTH / 100, height: GAME_HEIGHT / 100 }, scene);
+        const bounds = this.getBounds();
+        bgPlane = BABYLON.MeshBuilder.CreatePlane('bg', {
+          width: (bounds.right - bounds.left) || GAME_WIDTH / 100,
+          height: (bounds.top - bounds.bottom) || GAME_HEIGHT / 100,
+        }, scene);
         bgPlane.position.z = 10;
+
         const bgDt = new BABYLON.DynamicTexture('bgdt', { width: 512, height: 512 }, scene, false);
         const ctx = bgDt.getContext();
         ctx.fillStyle = '#000010';
@@ -221,32 +250,39 @@ export default function GalaxyWar() {
 
         this.enemyGroup = makeFormation();
 
-        // HUD
+        // HUD (Top Corners)
         advancedTexture = GUI.AdvancedDynamicTexture.CreateFullscreenUI('UI');
+
+        // Score (Top-Left)
         this.ui.score = new GUI.TextBlock();
         this.ui.score.text = `Score: ${this.score}`;
         this.ui.score.color = 'white';
-        this.ui.score.fontSize = 20;
+        this.ui.score.fontSize = 24 * (window.devicePixelRatio || 1);
+        this.ui.score.textHorizontalAlignment = GUI.Control.HORIZONTAL_ALIGNMENT_LEFT;
+        this.ui.score.textVerticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_TOP;
         this.ui.score.horizontalAlignment = GUI.Control.HORIZONTAL_ALIGNMENT_LEFT;
         this.ui.score.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_TOP;
-        this.ui.score.left = '12px';
-        this.ui.score.top = '8px';
+        this.ui.score.paddingLeft = '20px';
+        this.ui.score.paddingTop = '15px';
         advancedTexture.addControl(this.ui.score);
 
+        // Lives (Top-Right)
         this.ui.lives = new GUI.TextBlock();
         this.ui.lives.text = `Lives: ${this.lives}`;
         this.ui.lives.color = 'white';
-        this.ui.lives.fontSize = 20;
+        this.ui.lives.fontSize = 24 * (window.devicePixelRatio || 1);
+        this.ui.lives.textHorizontalAlignment = GUI.Control.HORIZONTAL_ALIGNMENT_RIGHT;
+        this.ui.lives.textVerticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_TOP;
         this.ui.lives.horizontalAlignment = GUI.Control.HORIZONTAL_ALIGNMENT_RIGHT;
         this.ui.lives.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_TOP;
-        this.ui.lives.right = '12px';
-        this.ui.lives.top = '8px';
+        this.ui.lives.paddingRight = '20px';
+        this.ui.lives.paddingTop = '15px';
         advancedTexture.addControl(this.ui.lives);
 
         this.ui.center = new GUI.TextBlock();
         this.ui.center.text = `Galaxy War`;
         this.ui.center.color = 'white';
-        this.ui.center.fontSize = 36;
+        this.ui.center.fontSize = 36 * (window.devicePixelRatio || 1);
         this.ui.center.horizontalAlignment = GUI.Control.HORIZONTAL_ALIGNMENT_CENTER;
         this.ui.center.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_CENTER;
         advancedTexture.addControl(this.ui.center);
@@ -254,11 +290,22 @@ export default function GalaxyWar() {
         this.ui.hint = new GUI.TextBlock();
         this.ui.hint.text = `Tap to Start (or press Space)`;
         this.ui.hint.color = '#aaccff';
-        this.ui.hint.fontSize = 18;
+        this.ui.hint.fontSize = 18 * (window.devicePixelRatio || 1);
         this.ui.hint.horizontalAlignment = GUI.Control.HORIZONTAL_ALIGNMENT_CENTER;
         this.ui.hint.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_CENTER;
         this.ui.hint.top = '40px';
         advancedTexture.addControl(this.ui.hint);
+
+        // Highscore display (hidden until needed)
+        this.ui.highscore = new GUI.TextBlock();
+        this.ui.highscore.text = `Highscore: ${this.highscore}`;
+        this.ui.highscore.color = '#ffdd88';
+        this.ui.highscore.fontSize = 20 * (window.devicePixelRatio || 1);
+        this.ui.highscore.horizontalAlignment = GUI.Control.HORIZONTAL_ALIGNMENT_CENTER;
+        this.ui.highscore.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_CENTER;
+        this.ui.highscore.top = '70px';
+        this.ui.highscore.isVisible = false;
+        advancedTexture.addControl(this.ui.highscore);
 
         // Input handling
         window.addEventListener('keydown', this._onKeyDown = (e) => {
@@ -275,13 +322,17 @@ export default function GalaxyWar() {
         // Pointer/touch for mobile controls. We'll use simple left/right thirds + tap to fire
         scene.onPointerObservable.add(this._pointerObserver = (pi) => {
           if (pi.type === BABYLON.PointerEventTypes.POINTERDOWN) {
+            // debounce input state changes briefly after state transitions
+            if (performance.now() < this.inputCooldownUntil) return;
             const x = pi.event.clientX;
-            const w = engine.getRenderingCanvasClientRect().width;
+            const w = (this.engine.getRenderingCanvasClientRect && this.engine.getRenderingCanvasClientRect().width) || window.innerWidth;
             if (this.state === 'MENU') return this.start();
             if (this.state === 'GAMEOVER') return this.restart();
             if (x < w / 3) this.input.left = true;
             else if (x > (w * 2) / 3) this.input.right = true;
-            else this._firePlayer();
+            else {
+              this._firePlayer();
+            }
           }
           if (pi.type === BABYLON.PointerEventTypes.POINTERUP) {
             this.input.left = false;
@@ -296,11 +347,57 @@ export default function GalaxyWar() {
           if (this.state === 'PLAYING') this.update(dt);
         });
 
+        // Render loop with visibility handling (pause when tab hidden to save CPU)
+        const renderFn = () => {
+          try { scene.render(); } catch (e) { }
+        };
+        engine.runRenderLoop(renderFn);
+
+        this._visibilityHandler = () => {
+          if (document.hidden) {
+            try { engine.stopRenderLoop(renderFn); } catch (e) {}
+          } else {
+            try { engine.runRenderLoop(renderFn); } catch (e) {}
+          }
+        };
+        document.addEventListener('visibilitychange', this._visibilityHandler);
+
+        // Responsiveness: update ortho and UI scaling on resize
+        this._resizeHandler = () => {
+          try { this.engine.resize(); } catch (e) {}
+          this._updateOrtho();
+
+          // adjust background width and height dynamically
+          if (bgPlane) {
+            const b = this.getBounds();
+            const width = (b.right - b.left) || (GAME_WIDTH / 100);
+            const height = (b.top - b.bottom) || (GAME_HEIGHT / 100);
+            bgPlane.scaling.x = width / (GAME_WIDTH / 100);
+            bgPlane.scaling.y = height / (GAME_HEIGHT / 100);
+            bgPlane.position.z = 10;
+          }
+
+          // reposition camera center if needed
+          this.camera.setTarget(BABYLON.Vector3.Zero());
+
+          // update GUI font sizes for DPI change
+          const dpr = window.devicePixelRatio || 1;
+          if (this.ui.score) this.ui.score.fontSize = 24 * dpr;
+          if (this.ui.lives) this.ui.lives.fontSize = 24 * dpr;
+          if (this.ui.center) this.ui.center.fontSize = 36 * dpr;
+          if (this.ui.hint) this.ui.hint.fontSize = 18 * dpr;
+          if (this.ui.highscore) this.ui.highscore.fontSize = 20 * dpr;
+        };
+
+        window.addEventListener('resize', this._resizeHandler);
+
         // Start rendering
-        engine.runRenderLoop(() => scene.render());
+        // (render loop already started above)
       }
 
       _tryStartOrFire() {
+        // prevent double-starts/restarts by cooldown
+        if (performance.now() < this.inputCooldownUntil) return;
         if (this.state === 'MENU') return this.start();
         if (this.state === 'PLAYING') return this._firePlayer();
         if (this.state === 'GAMEOVER') return this.restart();
@@ -310,9 +407,12 @@ export default function GalaxyWar() {
         this.state = 'PLAYING';
         this.ui.center.text = '';
         this.ui.hint.text = '';
+        if (this.ui.highscore) this.ui.highscore.isVisible = false;
         // ensure score/lives shown
         this.ui.score.text = `Score: ${this.score}`;
         this.ui.lives.text = `Lives: ${this.lives}`;
+        // small input cooldown
+        this.inputCooldownUntil = performance.now() + 300;
       }
 
       restart() {
@@ -327,7 +427,6 @@ export default function GalaxyWar() {
         this.enemyBullets.releaseAll();
 
         // reset enemy group: mark pool items inactive then re-acquire formation
-        // Do not dispose meshes (we use pool), just mark inactive
         this.enemyGroup.forEach(e => {
           e._active = false;
           e.isVisible = false;
@@ -360,11 +459,14 @@ export default function GalaxyWar() {
         this.player.isVisible = true;
         this.player._active = true;
 
-        // clear center/hint
+        // clear center/hint and hide highscore
         this.ui.center.text = '';
         this.ui.hint.text = '';
+        if (this.ui.highscore) this.ui.highscore.isVisible = false;
 
         this.state = 'PLAYING';
+        // prevent immediate accidental taps/spaces
+        this.inputCooldownUntil = performance.now() + 300;
       }
 
       _firePlayer() {
@@ -376,6 +478,7 @@ export default function GalaxyWar() {
         b.position.y += 0.9;
         b.isVisible = true;
         b._active = true;
+        this._playBeep(900, 0.05);
       }
 
       _enemyFire() {
@@ -390,6 +493,8 @@ export default function GalaxyWar() {
         b.position.y -= 0.7;
         b.isVisible = true;
         b._active = true;
+        // subtle different beep
+        this._playBeep(450, 0.06);
       }
 
       explode(pos) {
@@ -410,8 +515,10 @@ export default function GalaxyWar() {
         ps.start();
         setTimeout(() => ps.stop(), 200);
         setTimeout(() => {
-          try { ps.dispose(); } catch (e) {}
+          try { ps.dispose(); } catch (e) { }
         }, 1200);
+        // small explosion sound
+        this._playBeep(200 + Math.random() * 300, 0.08);
       }
 
       update(dt) {
@@ -495,7 +602,12 @@ export default function GalaxyWar() {
         this.state = 'GAMEOVER';
         this.ui.center.text = `You Win!`;
         this.ui.hint.text = `Tap to Restart`;
+        if (this.ui.highscore) {
+          this.ui.highscore.text = `Highscore: ${Math.max(this.highscore, this.score)}`;
+          this.ui.highscore.isVisible = true;
+        }
         this._saveHighscore();
+        this.inputCooldownUntil = performance.now() + 300;
       }
 
       gameOver() {
@@ -504,7 +616,12 @@ export default function GalaxyWar() {
         this.player.isVisible = false;
         this.ui.center.text = `Game Over`;
         this.ui.hint.text = `Tap to Restart`;
+        if (this.ui.highscore) {
+          this.ui.highscore.text = `Highscore: ${Math.max(this.highscore, this.score)}`;
+          this.ui.highscore.isVisible = true;
+        }
         this._saveHighscore();
+        this.inputCooldownUntil = performance.now() + 300;
       }
 
       _saveHighscore() {
@@ -518,11 +635,19 @@ export default function GalaxyWar() {
         try {
           window.removeEventListener('keydown', this._onKeyDown);
           window.removeEventListener('keyup', this._onKeyUp);
+        } catch (e) { }
+        try {
+          window.removeEventListener('resize', this._resizeHandler);
+        } catch (e) {}
+        try {
+          document.removeEventListener('visibilitychange', this._visibilityHandler);
         } catch (e) {}
         if (this.scene) {
-          try { this.scene.onBeforeRenderObservable.removeCallback(this._loop); } catch (e) {}
-          try { this.scene.onPointerObservable.remove(this._pointerObserver); } catch (e) {}
+          try { this.scene.onBeforeRenderObservable.removeCallback(this._loop); } catch (e) { }
+          try { this.scene.onPointerObservable.remove(this._pointerObserver); } catch (e) { }
         }
+        // dispose audio context if present
+        try { if (this._audioCtx) { this._audioCtx.close(); } } catch (e) {}
       }
     }
 
